@@ -13,10 +13,15 @@ class DQNAgent:
         :param state_size: the number of values in the state
         :param action_size: the number of actions the agent can take
         :param learning_rate: the learning rate for the neural network (default 0.001) (between 0 and 1 but reasonable values range from 0.0001 to 0.001)
+        changing this value will change the agent's learning speed, a higher value will make the agent learn faster but it may not learn as well
         :param discount_factor: the discount factor for the neural network (default 0.99) (between 0 and 1 but reasonable values range from 0.9 to 0.99)
+        changing this value will change the agent's focus between short term and long term rewards
         :param epsilon: the initial epsilon value for the epsilon greedy algorithm (default 1.0) (between 0 and 1 but reasonable values range from 0.9 to 1.0)
+        changing this value will change the agent's initial focus between exploration and exploitation
         :param epsilon_decay: the decay rate for epsilon (default 0.995) (between 0 and 1 but reasonable values range from 0.9 to 1.0)
+        changing this value will change the agent's focus between exploration and exploitation over time
         :param epsilon_min: the minimum value for epsilon (default 0.01) (between 0 and 1 but reasonable values range from 0.01 to 0.1)
+        changing this value will change how long the agent will explore before it starts exploiting
         :param activation: the activation function for the neural network (default 'relu') (options: 'relu', 'sigmoid', 'tanh' or 'linear')
             - relu is the most common activation function, usefully for hidden layers
             - sigmoid is useful for output layers when the output is a probability
@@ -36,8 +41,8 @@ class DQNAgent:
 
     def _build_model(self):
         model = tf.keras.Sequential([
-            tf.keras.layers.Dense(int(self.state_size * .75), input_dim=self.state_size, activation='relu'),
-            tf.keras.layers.Dense(int(self.state_size * .75), activation='relu'),
+            tf.keras.layers.Dense(int(self.state_size * 2), input_dim=self.state_size, activation='relu'),
+            tf.keras.layers.Dense(int(self.state_size * 2), activation='relu'),
             tf.keras.layers.Dense(self.action_size, activation='linear')
         ])
         model.compile(loss='mse', optimizer=tf.keras.optimizers.Adam(lr=self.learning_rate))
@@ -68,22 +73,42 @@ class DQNAgent:
     #         self.model.fit(state, q_values, epochs=1, verbose=0) # <- the probatic line
     #     if self.epsilon > self.epsilon_min:
     #         self.epsilon *= self.epsilon_decay
+    # def replay(self, batch_size):
+    #     if len(self.memory) < batch_size:
+    #         return
+    #     minibatch = random.sample(self.memory, batch_size//2)
+    #     for state, action, reward, next_state, done in minibatch:
+    #         target = reward
+    #         if not done:
+    #             q_next = np.max(self.model.predict(next_state)[0])
+    #             target = (reward + self.discount_factor * q_next)
+    #         q_values: ndarray[Union[int, float]] = self.model.predict(state)
+    #         action_index = np.argmax(action)
+    #         q_values[0][action_index] = target
+    #         self.model.fit(state, q_values, epochs=3, verbose=0, batch_size=2, use_multiprocessing=True)
+    #     if self.epsilon > self.epsilon_min:
+    #         self.epsilon *= self.epsilon_decay
     def replay(self, batch_size):
         if len(self.memory) < batch_size:
             return
         minibatch = random.sample(self.memory, batch_size)
-        for state, action, reward, next_state, done in minibatch:
-            target = reward
-            if not done:
-                q_next = np.max(self.model.predict(next_state)[0])
-                target = (reward + self.discount_factor * q_next)
-            q_values: ndarray[Union[int, float]] = self.model.predict(state)
-            action_index = np.argmax(action)
-            q_values[0][action_index] = target
-            self.model.fit(state, q_values, epochs=1, verbose=0)
+        states = np.zeros((batch_size, self.state_size))
+        targets = np.zeros((batch_size, self.action_size))
+        for i, (state, action, reward, next_state, done) in enumerate(minibatch):
+            states[i] = state
+            target = self._get_target(reward, next_state, done)
+            targets[i] = self.model.predict(state)[0]
+            targets[i][np.argmax(action)] = target
+        self.model.fit(states, targets, epochs=3, verbose=0, use_multiprocessing=True, batch_size=32, workers=8)
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
 
+    def _get_target(self, reward, next_state, done):
+        if done:
+            return reward
+        else:
+            q_next = np.max(self.model.predict(next_state)[0])
+            return reward + self.discount_factor * q_next
     def load(self, name):
         self.model.load_weights(name)
 

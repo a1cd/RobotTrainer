@@ -1,6 +1,7 @@
 # render box using arcade
 import os
 import random
+import time
 from typing import Optional, Union, Tuple
 
 import arcade
@@ -11,7 +12,7 @@ from numpy import ndarray
 
 import RL
 
-
+learnMode = False
 class PhysicsObject:
     def __init__(self, mass):
         self.mass = mass
@@ -57,9 +58,7 @@ class Robot(PhysicsObject):
         physics_object = physics_engine.get_physics_object(self.sprite)
 
         force = (self.forward_force, self.strafe_force)
-        print(force)
         physics_object.body.apply_force_at_local_point(force, (0, 0))
-        print(physics_object.body.force)
 
         # apply torque
         physics_object.body.torque = self.rotation_force
@@ -133,6 +132,7 @@ class Game(arcade.Window):
     def __init__(self, width, height, title):
         super().__init__(width, height, title)
         # set the background color
+        self.time_since_last_reset = 0
         self.ai: RL.DQNAgent = None
         arcade.set_background_color(arcade.color.WHITE)
 
@@ -151,9 +151,9 @@ class Game(arcade.Window):
         # create the physics engine
         self.physics_engine = PymunkPhysicsEngine(damping=0.5, gravity=(0, 0))
         # create the ai
-        self.ai = RL.DQNAgent(3, 3)
-        if os.path.exists("./models/robot_model.h5"):
-            self.ai.load("./models/robot_model.h5")
+        self.ai = RL.DQNAgent(3, 3, learning_rate=0.1, discount_factor=0.9)
+        if os.path.exists("./models/robot_model_last.h5"):
+            self.ai.load("./models/robot_model_last.h5")
 
         # create the robot
         self.robot = Robot(1, True)
@@ -172,21 +172,34 @@ class Game(arcade.Window):
         self.box = Box(1)
         self.box.add_to_engine(self.physics_engine)
 
+    def on_mouse_press(self, x: int, y: int, button: int, modifiers: int):
+        global learnMode
+        if button == arcade.MOUSE_BUTTON_LEFT:
+            self.reset()
+        if button == arcade.MOUSE_BUTTON_RIGHT:
+            # toggle global learn mode
+            learnMode = not learnMode
+            # display the current mode
+            if learnMode:
+                print("Learning mode")
+            else:
+                print("Playing mode")
     def reset(self):
         """Reset the environment to the start state"""
-        # reset the physics engine
-        self.physics_engine.reset()
+        self.time_since_last_reset = 0
+        # reset the physics engine by creating a new one
+        self.physics_engine = PymunkPhysicsEngine(damping=0.1, gravity=(0, 0))
         # reset the robots
         for robot in self.robots:
-            # randomize the robots' positions
+            robot.add_to_engine(self.physics_engine)
             physics_object = self.physics_engine.get_physics_object(robot.sprite)
             physics_object.body.position = (random.randint(0, 600), random.randint(0, 600))
             physics_object.body.angle = random.randint(0, 360)
         # reset the box
+        self.box.add_to_engine(self.physics_engine)
         physics_object = self.physics_engine.get_physics_object(self.box.sprite)
         physics_object.body.position = (random.randint(0, 600), random.randint(0, 600))
         physics_object.body.angle = random.randint(0, 360)
-
 
     def on_draw(self):
         arcade.start_render()
@@ -195,37 +208,50 @@ class Game(arcade.Window):
         self.box.draw()
 
     def on_update(self, delta_time):
+        if learnMode:
+            print("Learning mode")
+        else:
+            print("Playing mode")
         delta_time = min(delta_time, 1 / 5)
 
         # Define the goal position as a fixed location in the game world
         goal_position = (100, 100)
+        for i in range(len(self.robots)):
 
-        aiRobot: Robot = self.robots[0]
-        # take an action
-        state = self.get_state()
-        action = self.ai.act(state)
-        aiRobot.forward_force = action[0] * 100
-        aiRobot.strafe_force = action[1] * 100
-        aiRobot.rotation_force = action[2] * 360 * 2
+            aiRobot: Robot = self.robots[i]
+            # take an action
+            state = self.get_state()
+            action = self.ai.act(state)
+            aiRobot.forward_force = action[0] * 100
+            aiRobot.strafe_force = action[1] * 100
+            aiRobot.rotation_force = action[2] * 360 * 2
 
         # update the physics engine
         for robot in self.robots:
             robot.update(delta_time, self.physics_engine)
         self.box.update()
         next_state, reward, done = self.get_reward(goal_position)
+        print("reward: ", reward)
+        print("done: ", done)
         self.ai.remember(state, action, reward, next_state, done)
-        self.ai.replay(10)
+        if done and not learnMode:
+            self.reset()
+            self.ai.replay(100)
+        # train the ai
+        if learnMode:
+            self.ai.replay(25)
 
-        # save the model to a file
-        if done:
-            # create the models folder if it doesn't exist
-            if not os.path.exists("./models"):
-                os.makedirs("./models")
-            self.ai.save("./models/robot_model.h5")
-        else:
-            if not os.path.exists("./models"):
-                os.makedirs("./models")
-            self.ai.save("./models/robot_model_last.h5")
+            # save the model to a file
+            if done:
+                # create the models folder if it doesn't exist
+                if not os.path.exists("./models"):
+                    os.makedirs("./models")
+                self.ai.save("./models/robot_model.h5")
+                self.reset()
+            else:
+                if not os.path.exists("./models"):
+                    os.makedirs("./models")
+                self.ai.save("./models/robot_model_last.h5")
 
     def get_reward(self, goal_position):
         # Compute the Euclidean distance between the current position of the agent and the goal position
@@ -237,13 +263,25 @@ class Game(arcade.Window):
             # If the agent reaches the goal position, give it a positive reward
             reward = 100
             done = True
-            # Reset the environment
-            self.setup()
         else:
             # If the agent moves closer to the goal position, give it a small positive reward
             # If the agent moves farther away from the goal position, give it a negative reward
             reward = -distance_to_goal
             done = False
+
+        # Change reward based on time since last reset to encourage faster completion
+        reward -= self.time_since_last_reset / 1000
+        self.time_since_last_reset += 1
+
+        # if the robot is out of bounds, give it a negative reward
+        if self.robots[0].sprite.center_x < 0 or self.robots[0].sprite.center_x > self.width or self.robots[0].sprite.center_y < 0 or self.robots[0].sprite.center_y > self.height:
+            reward -= 100
+            done = True
+
+        # if the robot takes too long to complete the task, give it a negative reward
+        if self.time_since_last_reset > 500:
+            reward -= 100
+            done = True
         return self.get_state(), reward, done
 
     def get_state(self):
